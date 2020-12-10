@@ -35,7 +35,7 @@ namespace dss4net
                     byte[] body;
                     using (var stream = new MemoryStream())
                     {
-                        context.Request.Body.CopyTo(stream);
+                        await context.Request.Body.CopyToAsync(stream);
                         body = stream.ToArray();
                     }
 
