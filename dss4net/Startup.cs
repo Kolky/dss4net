@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System.Collections.Generic;
@@ -12,7 +11,7 @@ namespace dss4net
 {
     public class Startup
     {
-        private readonly IDictionary<string, Queue<string>> datastore = new Dictionary<string, Queue<string>>();
+        private readonly IDictionary<string, Queue<(byte[], string)>> datastore = new Dictionary<string, Queue<(byte[], string)>>();
 
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env, ILogger<Startup> logger)
         {
@@ -30,18 +29,19 @@ namespace dss4net
                     var id = context.Request.RouteValues["id"].ToString();
                     if (!this.datastore.ContainsKey(id))
                     {
-                        this.datastore.Add(id, new Queue<string>());
+                        this.datastore.Add(id, new Queue<(byte[], string)>());
                     }
 
-                    string body;
-                    using (var stream = new StreamReader(context.Request.Body))
+                    byte[] body;
+                    using (var stream = new MemoryStream())
                     {
-                        body = stream.ReadToEnd();
+                        context.Request.Body.CopyTo(stream);
+                        body = stream.ToArray();
                     }
 
-                    logger.LogInformation($"Recieved '{id}': {body} ({context.Request.ContentType})");
+                    logger.LogInformation($"Recieved '{id}': {body.Length} ({context.Request.ContentType})");
 
-                    this.datastore[id].Enqueue(body);
+                    this.datastore[id].Enqueue((body, context.Request.ContentType));
 
                     context.Response.StatusCode = (int)HttpStatusCode.OK;
                     await context.Response.Body.FlushAsync();
@@ -62,11 +62,12 @@ namespace dss4net
                     }
                     else
                     {
-                        var body = this.datastore[id].Dequeue();
+                        (byte[] body, string contentType) = this.datastore[id].Dequeue();
 
-                        logger.LogInformation($"Sent '{id}': {body}");
+                        logger.LogInformation($"Sent '{id}': {body.Length} ({contentType})");
                         context.Response.StatusCode = (int)HttpStatusCode.OK;
-                        await context.Response.WriteAsync(body);
+                        context.Response.ContentType = contentType;
+                        await context.Response.Body.WriteAsync(body);
                     }
 
                     await context.Response.Body.FlushAsync();
