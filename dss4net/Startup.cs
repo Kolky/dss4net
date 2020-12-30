@@ -1,8 +1,14 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using System.Collections.Generic;
+using Microsoft.Extensions.Logging.AzureAppServices;
+using Microsoft.Extensions.Logging.Console;
+using System;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -11,9 +17,34 @@ namespace dss4net
 {
     public class Startup
     {
-        private readonly IDictionary<string, Queue<(byte[], string)>> datastore = new Dictionary<string, Queue<(byte[], string)>>();
+        private readonly IConfiguration configuration;
 
-        public void Configure(IApplicationBuilder app, IWebHostEnvironment env, ILogger<Startup> logger)
+        public Startup(IConfiguration configuration)
+        {
+            this.configuration = configuration;
+        }
+
+        public void ConfigureServices(IServiceCollection services)
+        {
+            services.AddMemoryCache();
+            services.Configure<ConsoleLoggerOptions>(
+                config =>
+                {
+                    config.TimestampFormat = "[HH:mm:ss.fff] ";
+                });
+            services.Configure<AzureFileLoggerOptions>(options =>
+            {
+                options.FileName = "azure-diagnostics-";
+                options.FileSizeLimit = 50 * 1024;
+                options.RetainedFileCountLimit = 5;
+            });
+            services.Configure<AzureBlobLoggerOptions>(options =>
+            {
+                options.BlobName = "azure-log.txt";
+            });
+        }
+
+        public void Configure(IApplicationBuilder app, IWebHostEnvironment env, IMemoryCache cache, ILogger<Startup> logger)
         {
             if (env.IsDevelopment())
             {
@@ -24,12 +55,23 @@ namespace dss4net
 
             app.UseEndpoints(endpoints =>
             {
+                endpoints.MapGet("/echo/{data}", async context =>
+                {
+                    var data = context.Request.RouteValues["data"].ToString();
+                    await context.Response.WriteAsync(data);
+                });
+
                 endpoints.MapPost("/data/{id}", async context =>
                 {
                     var id = context.Request.RouteValues["id"].ToString();
-                    if (!this.datastore.ContainsKey(id))
+
+                    if (!cache.TryGetValue(id, out FixedSizeQueue<(byte[], string)> queue))
                     {
-                        this.datastore.Add(id, new Queue<(byte[], string)>());
+                        var cacheEntryOptions = new MemoryCacheEntryOptions()
+                            .SetSlidingExpiration(TimeSpan.FromMinutes(this.configuration.GetValue("slidingExpiration", 5.0)));
+
+                        queue = new FixedSizeQueue<(byte[], string)>(this.configuration.GetValue("fixedSize", 50));
+                        cache.Set(id, queue, cacheEntryOptions);
                     }
 
                     byte[] body;
@@ -39,9 +81,9 @@ namespace dss4net
                         body = stream.ToArray();
                     }
 
-                    logger.LogInformation($"Recieved '{id}': {body.Length} ({context.Request.ContentType})");
+                    queue.Enqueue((body, context.Request.ContentType));
 
-                    this.datastore[id].Enqueue((body, context.Request.ContentType));
+                    logger.LogInformation($"Post '{id}': {body.Length} ({context.Request.ContentType})");
 
                     context.Response.StatusCode = (int)HttpStatusCode.OK;
                     await context.Response.Body.FlushAsync();
@@ -50,24 +92,22 @@ namespace dss4net
                 endpoints.MapGet("/data/{id}", async context =>
                 {
                     var id = context.Request.RouteValues["id"].ToString();
-                    if (!this.datastore.ContainsKey(id))
+                    if (!cache.TryGetValue(id, out FixedSizeQueue<(byte[], string)> queue))
                     {
-                        logger.LogInformation($"Sent '{id}' does not exist");
+                        logger.LogInformation($"Get '{id}' does not exist");
                         context.Response.StatusCode = (int)HttpStatusCode.NotFound;
                     }
-                    else if (!this.datastore[id].Any())
+                    else if (!queue.Any())
                     {
-                        logger.LogInformation($"Sent '{id}' has no data");
+                        logger.LogInformation($"Get '{id}' has no data");
                         context.Response.StatusCode = (int)HttpStatusCode.NotFound;
                     }
-                    else
+                    else if (queue.TryDequeue(out (byte[] body, string contentType) result))
                     {
-                        (byte[] body, string contentType) = this.datastore[id].Dequeue();
-
-                        logger.LogInformation($"Sent '{id}': {body.Length} ({contentType})");
+                        logger.LogInformation($"Get '{id}': {result.body.Length} ({result.contentType})");
                         context.Response.StatusCode = (int)HttpStatusCode.OK;
-                        context.Response.ContentType = contentType;
-                        await context.Response.Body.WriteAsync(body);
+                        context.Response.ContentType = result.contentType;
+                        await context.Response.Body.WriteAsync(result.body);
                     }
 
                     await context.Response.Body.FlushAsync();
