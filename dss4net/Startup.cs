@@ -58,12 +58,17 @@ namespace dss4net
                 endpoints.MapGet("/echo/{data}", async context =>
                 {
                     var data = context.Request.RouteValues["data"].ToString();
+                    var ip = context.Connection.RemoteIpAddress;
+
+                    logger.LogInformation($"[{ip}] Echo '{data}'");
+
                     await context.Response.WriteAsync(data);
                 });
 
                 endpoints.MapPost("/data/{id}", async context =>
                 {
                     var id = context.Request.RouteValues["id"].ToString();
+                    var ip = context.Connection.RemoteIpAddress;
 
                     if (!cache.TryGetValue(id, out FixedSizeQueue<(byte[], string)> queue))
                     {
@@ -83,7 +88,7 @@ namespace dss4net
 
                     queue.Enqueue((body, context.Request.ContentType));
 
-                    logger.LogInformation($"Post '{id}': {body.Length} ({context.Request.ContentType})");
+                    logger.LogInformation($"[{ip}] Post '{id}': {body.Length} ({context.Request.ContentType})");
 
                     context.Response.StatusCode = (int)HttpStatusCode.OK;
                     await context.Response.Body.FlushAsync();
@@ -92,19 +97,21 @@ namespace dss4net
                 endpoints.MapGet("/data/{id}", async context =>
                 {
                     var id = context.Request.RouteValues["id"].ToString();
+                    var ip = context.Connection.RemoteIpAddress;
+
                     if (!cache.TryGetValue(id, out FixedSizeQueue<(byte[], string)> queue))
                     {
-                        logger.LogInformation($"Get '{id}' does not exist");
+                        logger.LogInformation($"[{ip}] Get '{id}' does not exist");
                         context.Response.StatusCode = (int)HttpStatusCode.NotFound;
                     }
                     else if (!queue.Any())
                     {
-                        logger.LogInformation($"Get '{id}' has no data");
+                        logger.LogInformation($"[{ip}] Get '{id}' has no data");
                         context.Response.StatusCode = (int)HttpStatusCode.NotFound;
                     }
                     else if (queue.TryDequeue(out (byte[] body, string contentType) result))
                     {
-                        logger.LogInformation($"Get '{id}': {result.body.Length} ({result.contentType})");
+                        logger.LogInformation($"[{ip}] Get '{id}': {result.body.Length} ({result.contentType})");
                         context.Response.StatusCode = (int)HttpStatusCode.OK;
                         context.Response.ContentType = result.contentType;
                         await context.Response.Body.WriteAsync(result.body);
